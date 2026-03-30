@@ -1,81 +1,113 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -e
 
-# --- Cấu hình hệ thống (8 Core / 16GB RAM) ---
+### CONFIG ###
+# Link Windows Server 2012 bạn cung cấp
+ISO_URL="https://go.microsoft.com/fwlink/p/?LinkID=2195443"
+ISO_FILE="server2012.iso"
+
+# Đổi sang thư mục home để tránh lỗi quyền ghi (Permission denied)
+DISK_FILE="$HOME/ws2012.qcow2"
+DISK_SIZE="32G"
+
+# Cấu hình theo yêu cầu của bạn
 RAM="16G"
 CORES="8"
-DISK="20G"
-ISO_URL="https://go.microsoft.com/fwlink/p/?LinkID=2195443"
-PORT=2222
 
-echo "--- BẮT ĐẦU QUY TRÌNH TỰ ĐỘNG HÓA WINDOWS SERVER 2012 ---"
+VNC_PORT="5900"
+FLAG_FILE="installed.flag"
+WORKDIR="$HOME/windows-idx"
 
-# 0. Dọn dẹp các tiến trình cũ để giải phóng RAM
-echo "-> Đang dọn dẹp tiến trình cũ..."
-pkill -f qemu-system-x86_64
-pkill -f bore
-rm -f bore_info
+### DỌN DẸP TRƯỚC KHI CHẠY ###
+echo "🧹 Đang dọn dẹp các tiến trình cũ..."
+pkill -9 -f qemu-system-x86_64 || true
+pkill -9 -f bore || true
 
-# 1. Tải QEMU System (Bản tĩnh - No Root)
-if [ ! -f "./qemu-system-x86_64" ]; then
-    echo "-> Đang tải QEMU System..."
-    curl -L https://github.com/multiarch/qemu-user-static/releases/download/v7.2.0-1/qemu-x86_64-static -o qemu-system-x86_64
-    chmod +x qemu-system-x86_64
-else
-    echo "-> Đã có QEMU System, bỏ qua."
+### CHECK KVM ###
+[ -e /dev/kvm ] || { echo "❌ Không có /dev/kvm (Sẽ chạy chậm hơn)"; KVM_OPT=""; }
+[ -e /dev/kvm ] && KVM_OPT="-enable-kvm -cpu host" || KVM_OPT="-cpu max"
+
+### PREP ###
+mkdir -p "$WORKDIR"
+cd "$WORKDIR"
+
+# Kiểm tra nếu chưa có ổ đĩa thì mới tạo
+if [ ! -f "$DISK_FILE" ]; then
+    echo "💾 Đang tạo ổ đĩa $DISK_SIZE..."
+    qemu-img create -f qcow2 "$DISK_FILE" "$DISK_SIZE"
 fi
 
-# 2. Tải QEMU Img (Sửa lỗi command not found)
-if [ ! -f "./qemu-img" ]; then
-    echo "-> Đang tải công cụ tạo đĩa qemu-img..."
-    curl -L https://github.com/minos-org/minos-static/raw/master/bin/qemu-img -o qemu-img
-    chmod +x qemu-img
-else
-    echo "-> Đã có qemu-img, bỏ qua."
+# Tải ISO nếu chưa có và chưa cài xong
+if [ ! -f "$FLAG_FILE" ]; then
+    if [ ! -f "$ISO_FILE" ]; then
+        echo "🌐 Đang tải ISO Windows Server 2012 (Vui lòng đợi)..."
+        wget --no-check-certificate -O "$ISO_FILE" "$ISO_URL"
+    fi
 fi
 
-# 3. Kiểm tra và tải ISO Windows Server 2012
-if [ ! -f "server2012.iso" ]; then
-    echo "-> Đang tải ISO (5GB) - Vui lòng đợi..."
-    curl -L "$ISO_URL" -o server2012.iso
-else
-    echo "-> Đã tìm thấy ISO, bỏ qua bước tải."
-fi
-
-# 4. Kiểm tra và tạo ổ đĩa ảo
-if [ ! -f "ws2012.qcow2" ]; then
-    echo "-> Đang khởi tạo ổ đĩa $DISK..."
-    ./qemu-img create -f qcow2 ws2012.qcow2 $DISK
-else
-    echo "-> Đã có ổ đĩa ws2012.qcow2, giữ nguyên dữ liệu cũ."
-fi
-
-# 5. Tải Bore Tunnel để kết nối từ xa
-if [ ! -f "bore" ]; then
-    echo "-> Đang cài đặt Bore Tunnel..."
+#################
+# BORE START    #
+#################
+if [ ! -f "./bore" ]; then
+    echo "📥 Đang cài đặt Bore Tunnel..."
     curl -L https://github.com/ekzhang/bore/releases/download/v0.5.1/bore-v0.5.1-x86_64-unknown-linux-musl.tar.gz | tar -xz
     chmod +x bore
 fi
 
-# 6. Khởi chạy QEMU ngầm (Background)
-echo "--- ĐANG KHỞI ĐỘNG MÁY ẢO (8 CORES / 16GB RAM) ---"
-./qemu-system-x86_64 \
-  -m $RAM -smp $CORES -cpu max \
-  -drive file=ws2012.qcow2,format=qcow2 -cdrom server2012.iso \
-  -vnc :1 -net nic,model=e1000 -net user,hostfwd=tcp:127.0.0.1:$PORT-:22 \
-  -nographic > /dev/null 2>&1 &
-
-# 7. Mở Tunnel ra Internet và lưu thông tin vào file
-nohup ./bore local $PORT --to bore.pub > bore_info 2>&1 &
+# Chạy Bore cho VNC (Port 5900)
+nohup ./bore local $VNC_PORT --to bore.pub > bore_vnc.log 2>&1 &
 sleep 5
-echo "--- THÔNG TIN KẾT NỐI TỪ XA ---"
-cat bore_info | grep "listening at" || echo "Đang khởi tạo tunnel..."
 
-# 8. Tự động đợi để nhảy vào Windows Shell (Giống Proot)
-echo "--- Đang đợi Windows bật SSH (localhost:$PORT)... ---"
-while ! timeout 1 bash -c "cat < /dev/tcp/127.0.0.1/$PORT" >/dev/null 2>&1; do
-  printf "."
-  sleep 10
-done
+VNC_PUBLIC=$(grep -oE 'bore.pub:[0-9]+' bore_vnc.log | head -n 1)
 
-echo -e "\n--- ĐÃ KẾT NỐI THÀNH CÔNG VÀO WINDOWS SHELL ---"
-ssh -p $PORT -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null Administrator@127.0.0.1
+echo "------------------------------------------"
+echo "🌍 VNC PUBLIC ADDRESS: $VNC_PUBLIC"
+echo "👉 Dùng VNC Viewer kết nối vào địa chỉ trên để cài đặt."
+echo "------------------------------------------"
+
+#################
+# RUN QEMU      #
+#################
+if [ ! -f "$FLAG_FILE" ]; then
+  echo "⚠️  CHẾ ĐỘ CÀI ĐẶT WINDOWS (LẦN ĐẦU)"
+  echo "👉 Sau khi cài xong và đặt mật khẩu, hãy quay lại đây nhập: xong"
+
+  ./qemu-system-x86_64 \
+    $KVM_OPT \
+    -smp "$CORES" \
+    -m "$RAM" \
+    -drive file="$DISK_FILE",if=virtio,format=qcow2 \
+    -cdrom "$ISO_FILE" \
+    -boot order=d \
+    -net nic,model=virtio -net user \
+    -vnc :0 \
+    -usb -device usb-tablet &
+
+  QEMU_PID=$!
+
+  while true; do
+    read -rp "👉 Nhập 'xong' sau khi cài hoàn tất: " DONE
+    if [ "$DONE" = "xong" ]; then
+      touch "$FLAG_FILE"
+      kill "$QEMU_PID"
+      pkill -f bore
+      rm -f "$ISO_FILE"
+      echo "✅ Hoàn tất! Lần sau chạy script sẽ boot thẳng vào Windows."
+      exit 0
+    fi
+  done
+
+else
+  echo "✅ Windows đã cài – Đang khởi động..."
+  
+  ./qemu-system-x86_64 \
+    $KVM_OPT \
+    -smp "$CORES" \
+    -m "$RAM" \
+    -drive file="$DISK_FILE",if=virtio,format=qcow2 \
+    -boot order=c \
+    -net nic,model=virtio -net user \
+    -vnc :0 \
+    -usb -device usb-tablet \
+    -nographic
+fi
