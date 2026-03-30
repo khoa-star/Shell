@@ -1,51 +1,50 @@
 #!/bin/bash
 
-# Cấu hình hệ thống theo yêu cầu
+# --- Cấu hình 8 Core / 16GB RAM ---
 RAM="16G"
 CORES="8"
 DISK="20G"
 ISO_URL="https://go.microsoft.com/fwlink/p/?LinkID=2195443"
+PORT=2222
 
-# 1. Tải QEMU Static (Chạy không cần root)
-if [ ! -f "qemu-system-x86_64" ]; then
-    echo "--- Đang tải bộ giả lập QEMU ---"
+echo "--- ĐANG KHỞI ĐỘNG HỆ THỐNG SHELL.SH ---"
+
+# 1. Kiểm tra QEMU
+if [ ! -f "./qemu-system-x86_64" ]; then
+    echo "-> Đang tải QEMU..."
     curl -L https://github.com/multiarch/qemu-user-static/releases/download/v7.2.0-1/qemu-x86_64-static -o qemu-system-x86_64
     chmod +x qemu-system-x86_64
 fi
 
-# 2. Tạo ổ cứng ảo 20GB
-if [ ! -f "ws2012.qcow2" ]; then
-    echo "--- Khởi tạo ổ đĩa 20GB ---"
-    qemu-img create -f qcow2 ws2012.qcow2 20G
-fi
-
-# 3. Tải ISO Windows Server 2012
+# 2. Kiểm tra ISO (Nếu có rồi sẽ BỎ QUA không tải lại)
 if [ ! -f "server2012.iso" ]; then
-    echo "--- Đang tải ISO Windows Server 2012... ---"
+    echo "-> Đang tải ISO Windows Server 2012..."
     curl -L "$ISO_URL" -o server2012.iso
+else
+    echo "-> Đã tìm thấy ISO, bỏ qua bước tải."
 fi
 
-# 4. Chạy QEMU dưới nền (Background)
-# hostfwd=tcp:127.0.0.1:2222-:22 => Đẩy cổng SSH vào trong VM
-echo "--- Đang khởi động Windows Server 2012 (8 Core / 16GB RAM) ---"
+# 3. Kiểm tra Ổ đĩa ảo (Nếu có rồi sẽ GIỮ LẠI dữ liệu cũ)
+if [ ! -f "ws2012.qcow2" ]; then
+    echo "-> Đang tạo ổ đĩa 20GB..."
+    qemu-img create -f qcow2 ws2012.qcow2 $DISK
+else
+    echo "-> Đã có ổ đĩa, đang khởi động từ dữ liệu cũ."
+fi
+
+# 4. Chạy QEMU ngầm
 ./qemu-system-x86_64 \
-  -m $RAM \
-  -smp $CORES \
-  -cpu host,migratable=on \
-  -drive file=ws2012.qcow2,format=qcow2 \
-  -cdrom server2012.iso \
-  -vnc :1 \
-  -net nic,model=e1000 -net user,hostfwd=tcp:127.0.0.1:2222-:22 \
+  -m $RAM -smp $CORES -cpu max \
+  -drive file=ws2012.qcow2,format=qcow2 -cdrom server2012.iso \
+  -vnc :1 -net nic,model=e1000 -net user,hostfwd=tcp:127.0.0.1:$PORT-:22 \
   -nographic > /dev/null 2>&1 &
 
-# 5. Vòng lặp chờ đợi để tự động SSH (Cơ chế giống Proot)
-echo "--- Đang chờ Windows Server mở cổng SSH (localhost:2222)... ---"
-echo "Lưu ý: Lần đầu bạn phải dùng VNC (Port 5901) để cài đặt và bật SSH Server."
-
-while ! nc -z localhost 2222; do
+# 5. Tự động đợi và SSH (Giống Proot)
+echo "--- Đang chờ Windows Shell sẵn sàng (Port $PORT) ---"
+while ! timeout 1 bash -c "cat < /dev/tcp/127.0.0.1/$PORT" >/dev/null 2>&1; do
   printf "."
   sleep 10
 done
 
-echo -e "\n--- KẾT NỐI THÀNH CÔNG! ---"
-ssh -p 2222 -o StrictHostKeyChecking=no Administrator@127.0.0.1
+echo -e "\n--- ĐÃ KẾT NỐI VÀO WINDOWS SHELL ---"
+ssh -p $PORT -o StrictHostKeyChecking=no Administrator@127.0.0.1
